@@ -4,12 +4,15 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEngine;
 
-[BurstCompile]
+//[BurstCompile]
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 public partial struct PathfindingSystem : ISystem
 {
+    [SerializeField]
     private EntityQuery pathfindingQuery;
+    [SerializeField]
     private EntityQuery gridQuery;
 
     [BurstCompile]
@@ -28,7 +31,7 @@ public partial struct PathfindingSystem : ISystem
         state.RequireForUpdate(gridQuery);
     }
 
-    [BurstCompile]
+    //[BurstCompile]
     public void OnUpdate(ref SystemState state)
     {
         var gridData = SystemAPI.GetSingleton<GridData>();

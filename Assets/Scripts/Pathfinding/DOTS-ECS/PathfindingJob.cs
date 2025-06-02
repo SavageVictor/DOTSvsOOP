@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
 
-[BurstCompile]
+//[BurstCompile]
 public struct PathfindingJob : IJobChunk
 {
     [ReadOnly] public GridData gridData;
