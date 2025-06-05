@@ -1,7 +1,7 @@
 ﻿using UnityEngine;
 using Unity.Entities;
 using Unity.Mathematics;
-using System.Collections;
+using Unity.Collections;
 
 namespace DOTS_ECS
 {
@@ -13,17 +13,15 @@ namespace DOTS_ECS
             set => entityCount = value;
         }
 
-        public float SpawnInterval
-        {
-            get => spawnInterval;
-            set => spawnInterval = value;
-        }
 
         [Header("Spawn Settings")]
-        [SerializeField] private int entityCount = 10;
-        [SerializeField] private float spawnInterval = 1f;
+        [SerializeField] private int entityCount = 1000;
+
+        [Header("Controls")]
         [SerializeField] private KeyCode spawnKey = KeyCode.Space;
         [SerializeField] private KeyCode clearKey = KeyCode.C;
+
+
 
         private EntityManager entityManager;
         private Unity.Mathematics.Random random;
@@ -38,7 +36,7 @@ namespace DOTS_ECS
         {
             if (Input.GetKeyDown(spawnKey))
             {
-                StartCoroutine(SpawnPathfindingRequests());
+                SpawnAllInstantly();
             }
 
             if (Input.GetKeyDown(clearKey))
@@ -47,43 +45,71 @@ namespace DOTS_ECS
             }
         }
 
-        public IEnumerator SpawnPathfindingRequests()
+        public void SpawnAllInstantly()
         {
-            Debug.Log($"Spawning {entityCount} pathfinding requests...");
+            Debug.Log($"Instantly spawning {entityCount} pathfinding requests...");
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
-            for (int i = 0; i < entityCount; i++)
-            {
-                SpawnSingleRequest();
-                yield return new WaitForSeconds(spawnInterval);
-            }
+            SpawnBatchOptimized(entityCount);
+
+            stopwatch.Stop();
+            Debug.Log($"✅ Spawned {entityCount} entities in {stopwatch.ElapsedMilliseconds}ms");
         }
 
-        void SpawnSingleRequest()
+        // Optimized batch spawning using EntityManager bulk operations
+        void SpawnBatchOptimized(int count)
         {
             if (GridManager.Instance == null) return;
 
             var grid = GridManager.Instance;
 
-            int2 start = GenerateRandomWalkablePosition(grid);
-            int2 target = GenerateRandomWalkablePosition(grid);
+            // Pre-generate all positions to avoid repeated grid checks
+            var startPositions = new NativeArray<int2>(count, Allocator.Temp);
+            var targetPositions = new NativeArray<int2>(count, Allocator.Temp);
 
-            var entity = entityManager.CreateEntity();
-            entityManager.AddComponent<PathfindingRequest>(entity);
-            entityManager.AddBuffer<PathResult>(entity);
-
-            entityManager.SetComponentData(entity, new PathfindingRequest
+            // Generate all positions upfront
+            for (int i = 0; i < count; i++)
             {
-                startPosition = start,
-                targetPosition = target,
-                isProcessing = false,
-                hasResult = false
-            });
+                startPositions[i] = GenerateRandomWalkablePosition(grid);
+                targetPositions[i] = GenerateRandomWalkablePosition(grid);
+            }
 
-            Debug.Log($"Pathfinding request: {start} → {target}");
+            // Create archetype for efficient entity creation
+            var archetype = entityManager.CreateArchetype(
+                typeof(PathfindingRequest),
+                typeof(PathResult)
+            );
+
+            // Bulk create entities
+            var entities = new NativeArray<Entity>(count, Allocator.Temp);
+            entityManager.CreateEntity(archetype, entities);
+
+            // Set component data for all entities
+            for (int i = 0; i < count; i++)
+            {
+                entityManager.SetComponentData(entities[i], new PathfindingRequest
+                {
+                    startPosition = startPositions[i],
+                    targetPosition = targetPositions[i],
+                    isProcessing = false,
+                    hasResult = false
+                });
+
+                // Initialize empty path buffer (already added by archetype)
+                var pathBuffer = entityManager.GetBuffer<PathResult>(entities[i]);
+                pathBuffer.Clear();
+            }
+
+            // Cleanup
+            entities.Dispose();
+            startPositions.Dispose();
+            targetPositions.Dispose();
         }
 
+        // Optimized position generation with retry limit and fallback
         int2 GenerateRandomWalkablePosition(GridManager grid)
         {
+            const int maxAttempts = 50;
             int attempts = 0;
             int2 position;
 
@@ -95,7 +121,31 @@ namespace DOTS_ECS
                 );
                 attempts++;
             }
-            while (!grid.IsWalkable(position) && attempts < 100);
+            while (!grid.IsWalkable(position) && attempts < maxAttempts);
+
+            // Fallback: if we can't find a walkable position, try corners
+            if (!grid.IsWalkable(position))
+            {
+                var fallbackPositions = new int2[]
+                {
+                    new int2(0, 0),
+                    new int2(grid.gridSize.x - 1, 0),
+                    new int2(0, grid.gridSize.y - 1),
+                    new int2(grid.gridSize.x - 1, grid.gridSize.y - 1),
+                    new int2(grid.gridSize.x / 2, grid.gridSize.y / 2)
+                };
+
+                foreach (var fallback in fallbackPositions)
+                {
+                    if (grid.IsWalkable(fallback))
+                    {
+                        return fallback;
+                    }
+                }
+
+                // Last resort: return any position (pathfinding will handle invalid cases)
+                Debug.LogWarning("Could not find walkable position, using fallback");
+            }
 
             return position;
         }
@@ -107,9 +157,22 @@ namespace DOTS_ECS
 
             Debug.Log($"Clearing {entities.Length} pathfinding requests...");
 
+            // Bulk destroy for better performance
             entityManager.DestroyEntity(entities);
+
             entities.Dispose();
             query.Dispose();
+
+            Debug.Log("✅ All pathfinding requests cleared");
         }
-    } 
+
+        // Add this method to get current entity count
+        public int GetCurrentEntityCount()
+        {
+            var query = entityManager.CreateEntityQuery(typeof(PathfindingRequest));
+            int count = query.CalculateEntityCount();
+            query.Dispose();
+            return count;
+        }
+    }
 }

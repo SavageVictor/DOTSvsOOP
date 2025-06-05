@@ -70,7 +70,6 @@ namespace DOTS_ECS
 
             // Input field events
             entityCountInput.onEndEdit.AddListener(OnEntityCountChanged);
-            spawnIntervalInput.onEndEdit.AddListener(OnSpawnIntervalChanged);
             maxPathsInput.onEndEdit.AddListener(OnMaxPathsChanged);
             autoExportIntervalInput.onEndEdit.AddListener(OnAutoExportIntervalChanged);
             gridWidthInput.onEndEdit.AddListener(OnGridWidthChanged);
@@ -96,7 +95,6 @@ namespace DOTS_ECS
             if (pathfindingSpawner != null)
             {
                 entityCountInput.text = pathfindingSpawner.EntityCount.ToString();
-                spawnIntervalInput.text = pathfindingSpawner.SpawnInterval.ToString("F2");
             }
 
             if (dataCollector != null)
@@ -169,7 +167,7 @@ namespace DOTS_ECS
         {
             if (pathfindingSpawner != null)
             {
-                StartCoroutine(pathfindingSpawner.SpawnPathfindingRequests());
+                pathfindingSpawner.SpawnAllInstantly();
             }
         }
 
@@ -204,14 +202,6 @@ namespace DOTS_ECS
             if (pathfindingSpawner != null && int.TryParse(value, out int count))
             {
                 pathfindingSpawner.EntityCount = count;
-            }
-        }
-
-        void OnSpawnIntervalChanged(string value)
-        {
-            if (pathfindingSpawner != null && float.TryParse(value, out float interval))
-            {
-                pathfindingSpawner.SpawnInterval = interval;
             }
         }
 
