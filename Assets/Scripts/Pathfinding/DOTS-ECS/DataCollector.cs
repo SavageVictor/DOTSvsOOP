@@ -16,25 +16,41 @@ namespace DOTS_ECS
     }
 
     [System.Serializable]
+    public class SpawnBatchData
+    {
+        public int batchId;
+        public string timestamp;
+        public int entityCount;
+        public float totalTimeMs;
+        public float avgTimePerEntityMs;
+        public List<int> pathIds = new List<int>();
+        public float successRate;
+    }
+
+    [System.Serializable]
     public class PathfindingData
     {
         public string timestamp;
         public int2 gridSize;
         public List<PathRecord> paths;
+        public List<SpawnBatchData> spawnBatches;
         public DataStatistics stats;
+        public PerformanceStatistics performance;
     }
 
     [System.Serializable]
     public class PathRecord
     {
         public int id;
+        public int batchId;
         public int2 start;
         public int2 end;
         public bool success;
         public int length;
-        public float timeMs;
-        public string coordinates; // Only if ExportFormat.WithCoordinates
-        public List<string> map;   // Only if ExportFormat.WithMaps
+        public float timeMs; // Will be 0 for DOTS, real timing for Mono
+        public bool hasRealTiming; // NEW: Flag to indicate if timing is real
+        public string coordinates;
+        public List<string> map;
     }
 
     [System.Serializable]
@@ -45,6 +61,26 @@ namespace DOTS_ECS
         public float successRate;
         public float avgLength;
         public float avgTimeMs;
+        public float totalTimeMs;
+        // NEW: Throughput metrics
+        public float pathsPerSecond;
+        public float avgPathsPerSecond;
+        public float peakPathsPerSecond;
+    }
+
+    [System.Serializable]
+    public class PerformanceStatistics
+    {
+        public int totalSpawnBatches;
+        public float totalSpawnTimeMs;
+        public float avgSpawnBatchTimeMs;
+        public float fastestBatchTimeMs;
+        public float slowestBatchTimeMs;
+        public int largestBatchSize;
+        public int smallestBatchSize;
+        // NEW: Throughput over time
+        public float overallPathsPerSecond;
+        public float dataCollectionDurationSeconds;
     }
 
     public class DataCollector : MonoBehaviour
@@ -74,12 +110,63 @@ namespace DOTS_ECS
         }
 
         public PathfindingData CurrentData => currentData;
-
         public bool IsCollecting => currentData?.paths?.Count > 0;
+
+        // NEW: Public properties for UI access
+        public float CurrentPathsPerSecond => currentPathsPerSecond;
+        public float AveragePathsPerSecond => currentData?.stats?.avgPathsPerSecond ?? 0f;
+        public float PeakPathsPerSecond => currentData?.stats?.peakPathsPerSecond ?? 0f;
 
         public void TriggerExport()
         {
             ExportData();
+        }
+
+        public void StartSpawnBatch(int entityCount)
+        {
+            currentSpawnBatch = new SpawnBatchData
+            {
+                batchId = nextBatchId++,
+                timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                entityCount = entityCount,
+                pathIds = new List<int>()
+            };
+            spawnBatchStartTime = Time.realtimeSinceStartup;
+
+            if (enableDebugLogging)
+            {
+                Debug.Log($"Started spawn batch {currentSpawnBatch.batchId} with {entityCount} entities");
+            }
+        }
+
+        public void EndSpawnBatch()
+        {
+            if (currentSpawnBatch != null)
+            {
+                float elapsedTime = (Time.realtimeSinceStartup - spawnBatchStartTime) * 1000f;
+                currentSpawnBatch.totalTimeMs = elapsedTime;
+                currentSpawnBatch.avgTimePerEntityMs = elapsedTime / currentSpawnBatch.entityCount;
+
+                int successfulInBatch = 0;
+                foreach (var pathId in currentSpawnBatch.pathIds)
+                {
+                    var path = currentData.paths.Find(p => p.id == pathId);
+                    if (path != null && path.success) successfulInBatch++;
+                }
+                currentSpawnBatch.successRate = currentSpawnBatch.pathIds.Count > 0 ?
+                    (float)successfulInBatch / currentSpawnBatch.pathIds.Count : 0f;
+
+                currentData.spawnBatches.Add(currentSpawnBatch);
+                UpdatePerformanceStatistics();
+
+                if (enableDebugLogging)
+                {
+                    Debug.Log($"Completed spawn batch {currentSpawnBatch.batchId}: {elapsedTime:F1}ms total, " +
+                             $"{currentSpawnBatch.avgTimePerEntityMs:F1}ms per entity, {currentSpawnBatch.successRate:P1} success");
+                }
+
+                currentSpawnBatch = null;
+            }
         }
 
         [Header("Export Settings")]
@@ -96,22 +183,44 @@ namespace DOTS_ECS
         [SerializeField] private bool enableDebugLogging = false;
         [SerializeField] private bool enableVerboseLogging = false;
 
+        [Header("Performance Tracking")]
+        [SerializeField] private float throughputUpdateInterval = 1.0f; // How often to calculate paths/sec
+
         private PathfindingData currentData;
         private HashSet<Entity> processedEntities;
         private EntityManager entityManager;
         private int nextId = 0;
+        private int nextBatchId = 0;
         private float lastExportTime;
+
+        private SpawnBatchData currentSpawnBatch;
+        private float spawnBatchStartTime;
+
+        // NEW: Throughput tracking variables
+        private float lastThroughputUpdate;
+        private int pathsAtLastUpdate;
+        private float currentPathsPerSecond;
+        private List<float> throughputHistory = new List<float>();
+        private float dataCollectionStartTime;
 
         void Start()
         {
             entityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
             InitializeData();
             CreateDirectory();
+
+            // NEW: Initialize throughput tracking
+            dataCollectionStartTime = Time.realtimeSinceStartup;
+            lastThroughputUpdate = Time.realtimeSinceStartup;
+            pathsAtLastUpdate = 0;
         }
 
         void Update()
         {
             CollectCompletedPaths();
+
+            // NEW: Update throughput calculations
+            UpdateThroughputMetrics();
 
             // Clean up old processed entities periodically
             if (processedEntities.Count > maxPaths * 2)
@@ -138,16 +247,52 @@ namespace DOTS_ECS
                 timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
                 gridSize = GridManager.Instance ? GridManager.Instance.gridSize : new int2(20, 20),
                 paths = new List<PathRecord>(),
-                stats = new DataStatistics()
+                spawnBatches = new List<SpawnBatchData>(),
+                stats = new DataStatistics(),
+                performance = new PerformanceStatistics()
             };
 
             processedEntities = new HashSet<Entity>();
+
+            // NEW: Reset throughput tracking
+            throughputHistory.Clear();
+            currentPathsPerSecond = 0f;
         }
 
         void CreateDirectory()
         {
             string fullPath = Path.Combine(Application.persistentDataPath, saveDirectory);
             Directory.CreateDirectory(fullPath);
+        }
+
+        // NEW: Update throughput metrics
+        void UpdateThroughputMetrics()
+        {
+            float currentTime = Time.realtimeSinceStartup;
+            float timeSinceLastUpdate = currentTime - lastThroughputUpdate;
+
+            if (timeSinceLastUpdate >= throughputUpdateInterval)
+            {
+                int currentPathCount = currentData.paths.Count;
+                int pathsCompleted = currentPathCount - pathsAtLastUpdate;
+
+                currentPathsPerSecond = pathsCompleted / timeSinceLastUpdate;
+                throughputHistory.Add(currentPathsPerSecond);
+
+                // Keep only recent history (last 60 samples = 1 minute at 1-second intervals)
+                if (throughputHistory.Count > 60)
+                {
+                    throughputHistory.RemoveAt(0);
+                }
+
+                if (enableVerboseLogging)
+                {
+                    Debug.Log($"Throughput: {currentPathsPerSecond:F1} paths/sec (completed {pathsCompleted} in {timeSinceLastUpdate:F1}s)");
+                }
+
+                lastThroughputUpdate = currentTime;
+                pathsAtLastUpdate = currentPathCount;
+            }
         }
 
         void CollectCompletedPaths()
@@ -187,7 +332,6 @@ namespace DOTS_ECS
 
                 var pathBuffer = entityManager.GetBuffer<PathResult>(entity);
 
-                // CRITICAL FIX: Validate if path actually reaches the target
                 bool pathComplete = false;
                 bool pathTruncated = false;
 
@@ -196,7 +340,6 @@ namespace DOTS_ECS
                     var lastPosition = pathBuffer[pathBuffer.Length - 1].position;
                     pathComplete = lastPosition.Equals(request.targetPosition);
 
-                    // Check for the 63-node truncation pattern
                     if (!pathComplete && pathBuffer.Length >= 63)
                     {
                         pathTruncated = true;
@@ -207,14 +350,20 @@ namespace DOTS_ECS
                 var record = new PathRecord
                 {
                     id = nextId++,
+                    batchId = currentSpawnBatch?.batchId ?? -1,
                     start = request.startPosition,
                     end = request.targetPosition,
-                    success = pathComplete && !pathTruncated, // Only successful if complete AND not truncated
+                    success = pathComplete && !pathTruncated,
                     length = pathBuffer.Length,
-                    timeMs = UnityEngine.Random.Range(0.1f, 5.0f)
+                    timeMs = 0f, // No individual timing in DOTS
+                    hasRealTiming = false // NEW: Flag that this is DOTS (no real timing)
                 };
 
-                // Add coordinates if requested
+                if (currentSpawnBatch != null)
+                {
+                    currentSpawnBatch.pathIds.Add(record.id);
+                }
+
                 if (exportFormat >= ExportFormat.WithCoordinates && pathBuffer.Length > 0)
                 {
                     var coords = new System.Text.StringBuilder();
@@ -225,7 +374,6 @@ namespace DOTS_ECS
                         if (i < pathBuffer.Length - 1) coords.Append(" → ");
                     }
 
-                    // Add truncation indicator if path was cut off
                     if (pathTruncated)
                     {
                         coords.Append(" [TRUNCATED]");
@@ -246,7 +394,7 @@ namespace DOTS_ECS
                 if (enableDebugLogging)
                 {
                     string status = pathComplete ? "SUCCESS" : (pathTruncated ? "TRUNCATED" : "FAILED");
-                    Debug.Log($"✅ Collected path {record.id}: {record.start} → {record.end} ({status}) - Length: {record.length}");
+                    Debug.Log($"Collected path {record.id}: {record.start} → {record.end} ({status}) - Length: {record.length}");
                 }
 
                 if (currentData.paths.Count >= maxPaths) break;
@@ -254,10 +402,10 @@ namespace DOTS_ECS
 
             if (newPathsFound > 0 && enableDebugLogging)
             {
-                Debug.Log($"📊 Collected {newPathsFound} new paths this frame. Total: {currentData.paths.Count}");
+                Debug.Log($"Collected {newPathsFound} new paths this frame. Total: {currentData.paths.Count}");
                 if (truncatedPaths > 0)
                 {
-                    Debug.LogWarning($"⚠️ Found {truncatedPaths} truncated paths due to buffer capacity limits!");
+                    Debug.LogWarning($"Found {truncatedPaths} truncated paths due to buffer capacity limits!");
                 }
             }
 
@@ -278,7 +426,6 @@ namespace DOTS_ECS
                 validEntities.Add(entity);
             }
 
-            // Remove entities that no longer exist
             var toRemove = new List<Entity>();
             foreach (var entity in processedEntities)
             {
@@ -363,6 +510,59 @@ namespace DOTS_ECS
             stats.successRate = stats.total > 0 ? (float)stats.successful / stats.total : 0f;
             stats.avgLength = stats.successful > 0 ? totalLength / stats.successful : 0f;
             stats.avgTimeMs = stats.total > 0 ? totalTime / stats.total : 0f;
+            stats.totalTimeMs = totalTime;
+
+            // NEW: Update throughput statistics
+            stats.pathsPerSecond = currentPathsPerSecond;
+
+            if (throughputHistory.Count > 0)
+            {
+                float sum = 0f;
+                float peak = 0f;
+                foreach (var throughput in throughputHistory)
+                {
+                    sum += throughput;
+                    if (throughput > peak) peak = throughput;
+                }
+                stats.avgPathsPerSecond = sum / throughputHistory.Count;
+                stats.peakPathsPerSecond = peak;
+            }
+        }
+
+        void UpdatePerformanceStatistics()
+        {
+            var perf = currentData.performance;
+            perf.totalSpawnBatches = currentData.spawnBatches.Count;
+
+            if (currentData.spawnBatches.Count > 0)
+            {
+                float totalSpawnTime = 0;
+                float fastest = float.MaxValue;
+                float slowest = 0;
+                int largest = 0;
+                int smallest = int.MaxValue;
+
+                foreach (var batch in currentData.spawnBatches)
+                {
+                    totalSpawnTime += batch.totalTimeMs;
+                    if (batch.totalTimeMs < fastest) fastest = batch.totalTimeMs;
+                    if (batch.totalTimeMs > slowest) slowest = batch.totalTimeMs;
+                    if (batch.entityCount > largest) largest = batch.entityCount;
+                    if (batch.entityCount < smallest) smallest = batch.entityCount;
+                }
+
+                perf.totalSpawnTimeMs = totalSpawnTime;
+                perf.avgSpawnBatchTimeMs = totalSpawnTime / currentData.spawnBatches.Count;
+                perf.fastestBatchTimeMs = fastest;
+                perf.slowestBatchTimeMs = slowest;
+                perf.largestBatchSize = largest;
+                perf.smallestBatchSize = smallest;
+            }
+
+            // NEW: Calculate overall throughput
+            float totalDataTime = Time.realtimeSinceStartup - dataCollectionStartTime;
+            perf.dataCollectionDurationSeconds = totalDataTime;
+            perf.overallPathsPerSecond = totalDataTime > 0 ? currentData.paths.Count / totalDataTime : 0f;
         }
 
         void ExportData()
@@ -378,12 +578,25 @@ namespace DOTS_ECS
                 File.WriteAllText(fullPath, json);
 
                 Debug.Log($"Exported {currentData.paths.Count} paths to: {fullPath}");
-                Debug.Log($"Success rate: {currentData.stats.successRate:P1}, Avg time: {currentData.stats.avgTimeMs:F1}ms");
+                Debug.Log($"Success rate: {currentData.stats.successRate:P1}, Avg time: {currentData.stats.avgTimeMs:F1}ms, Total time: {currentData.stats.totalTimeMs:F1}ms");
+
+                // NEW: Throughput logging
+                Debug.Log($"Throughput: Current: {currentData.stats.pathsPerSecond:F1} paths/sec, " +
+                         $"Average: {currentData.stats.avgPathsPerSecond:F1} paths/sec, " +
+                         $"Peak: {currentData.stats.peakPathsPerSecond:F1} paths/sec, " +
+                         $"Overall: {currentData.performance.overallPathsPerSecond:F1} paths/sec");
+
+                if (currentData.performance.totalSpawnBatches > 0)
+                {
+                    Debug.Log($"Performance: {currentData.performance.totalSpawnBatches} batches, " +
+                             $"Total spawn time: {currentData.performance.totalSpawnTimeMs:F1}ms, " +
+                             $"Avg per batch: {currentData.performance.avgSpawnBatchTimeMs:F1}ms");
+                }
             }
             catch (Exception e)
             {
                 Debug.LogError($"Export failed: {e.Message}");
             }
         }
-    } 
+    }
 }

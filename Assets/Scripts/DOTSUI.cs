@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
 using TMPro;
@@ -34,6 +34,8 @@ namespace DOTS_ECS
         [Header("Display")]
         [SerializeField] private TMP_Text performanceText;
         [SerializeField] private TMP_Text statsText;
+        [SerializeField] private TMP_Text batchStatsText;
+        [SerializeField] private TMP_Text throughputText; // NEW: For throughput display
 
         [Header("Component References")]
         [SerializeField] private PathfindingSpawner pathfindingSpawner;
@@ -56,6 +58,8 @@ namespace DOTS_ECS
         {
             UpdatePerformanceDisplay();
             UpdateStatsDisplay();
+            UpdateBatchStatsDisplay();
+            UpdateThroughputDisplay(); // NEW: Update throughput display
             HandleInputs();
         }
 
@@ -70,6 +74,7 @@ namespace DOTS_ECS
 
             // Input field events
             entityCountInput.onEndEdit.AddListener(OnEntityCountChanged);
+            spawnIntervalInput.onEndEdit.AddListener(OnSpawnIntervalChanged);
             maxPathsInput.onEndEdit.AddListener(OnMaxPathsChanged);
             autoExportIntervalInput.onEndEdit.AddListener(OnAutoExportIntervalChanged);
             gridWidthInput.onEndEdit.AddListener(OnGridWidthChanged);
@@ -95,6 +100,7 @@ namespace DOTS_ECS
             if (pathfindingSpawner != null)
             {
                 entityCountInput.text = pathfindingSpawner.EntityCount.ToString();
+                spawnIntervalInput.text = pathfindingSpawner.SpawnInterval.ToString("F2");
             }
 
             if (dataCollector != null)
@@ -131,7 +137,10 @@ namespace DOTS_ECS
                 float fps = 1.0f / deltaTime;
                 float ms = deltaTime * 1000.0f;
 
-                performanceText.text = $"DOTS ECS | FPS: {fps:F1} | Frame: {ms:F1}ms";
+                // Add throughput to performance display
+                float currentThroughput = dataCollector != null ? dataCollector.CurrentPathsPerSecond : 0f;
+
+                performanceText.text = $"DOTS ECS | FPS: {fps:F1} | Frame: {ms:F1}ms | Throughput: {currentThroughput:F1} paths/sec";
             }
         }
 
@@ -144,11 +153,61 @@ namespace DOTS_ECS
 
                 statsText.text = $"Paths: {pathCount}/{dataCollector.MaxPaths} | " +
                                 $"Success: {stats.successRate:P1} | " +
-                                $"Avg Time: {stats.avgTimeMs:F1}ms";
+                                $"Avg Length: {stats.avgLength:F1}"; // Removed timing since it's not meaningful in DOTS
             }
             else
             {
                 statsText.text = "No data available";
+            }
+        }
+
+        void UpdateBatchStatsDisplay()
+        {
+            if (batchStatsText == null) return;
+
+            if (dataCollector != null && dataCollector.CurrentData != null && dataCollector.CurrentData.performance != null)
+            {
+                var perf = dataCollector.CurrentData.performance;
+                var batchCount = dataCollector.CurrentData.spawnBatches.Count;
+
+                if (batchCount > 0)
+                {
+                    batchStatsText.text = $"Batches: {batchCount} | " +
+                                         $"Total Spawn Time: {perf.totalSpawnTimeMs:F1}ms | " +
+                                         $"Avg/Batch: {perf.avgSpawnBatchTimeMs:F1}ms | " +
+                                         $"Fastest: {perf.fastestBatchTimeMs:F1}ms | " +
+                                         $"Slowest: {perf.slowestBatchTimeMs:F1}ms";
+                }
+                else
+                {
+                    batchStatsText.text = "No spawn batches yet";
+                }
+            }
+            else
+            {
+                batchStatsText.text = "Batch stats unavailable";
+            }
+        }
+
+        // NEW: Update throughput display
+        void UpdateThroughputDisplay()
+        {
+            if (throughputText == null) return;
+
+            if (dataCollector != null && dataCollector.CurrentData != null)
+            {
+                var stats = dataCollector.CurrentData.stats;
+                var perf = dataCollector.CurrentData.performance;
+
+                // Show current, average, peak, and overall throughput
+                throughputText.text = $"Current: {stats.pathsPerSecond:F1} paths/sec | " +
+                                     $"Avg: {stats.avgPathsPerSecond:F1} | " +
+                                     $"Peak: {stats.peakPathsPerSecond:F1} | " +
+                                     $"Overall: {perf.overallPathsPerSecond:F1}";
+            }
+            else
+            {
+                throughputText.text = "Throughput: Waiting for data...";
             }
         }
 
@@ -167,7 +226,7 @@ namespace DOTS_ECS
         {
             if (pathfindingSpawner != null)
             {
-                pathfindingSpawner.SpawnAllInstantly();
+                StartCoroutine(pathfindingSpawner.SpawnPathfindingRequests());
             }
         }
 
@@ -202,6 +261,14 @@ namespace DOTS_ECS
             if (pathfindingSpawner != null && int.TryParse(value, out int count))
             {
                 pathfindingSpawner.EntityCount = count;
+            }
+        }
+
+        void OnSpawnIntervalChanged(string value)
+        {
+            if (pathfindingSpawner != null && float.TryParse(value, out float interval))
+            {
+                pathfindingSpawner.SpawnInterval = interval;
             }
         }
 

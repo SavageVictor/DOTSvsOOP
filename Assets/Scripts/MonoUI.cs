@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.SceneManagement;
 using TMPro;
@@ -35,6 +35,8 @@ namespace Mono
         [Header("Display")]
         [SerializeField] private TMP_Text performanceText;
         [SerializeField] private TMP_Text statsText;
+        [SerializeField] private TMP_Text batchStatsText;
+        [SerializeField] private TMP_Text throughputText; // NEW: For throughput display
 
         [Header("Component References")]
         [SerializeField] private PathfindingSpawner pathfindingSpawner;
@@ -57,6 +59,8 @@ namespace Mono
         {
             UpdatePerformanceDisplay();
             UpdateStatsDisplay();
+            UpdateBatchStatsDisplay();
+            UpdateThroughputDisplay(); // NEW: Update throughput display
             HandleInputs();
         }
 
@@ -134,7 +138,10 @@ namespace Mono
                 float fps = 1.0f / deltaTime;
                 float ms = deltaTime * 1000.0f;
 
-                performanceText.text = $"MonoBehaviour | FPS: {fps:F1} | Frame: {ms:F1}ms";
+                // Add throughput to performance display
+                float currentThroughput = dataCollector != null ? dataCollector.CurrentPathsPerSecond : 0f;
+
+                performanceText.text = $"MonoBehaviour | FPS: {fps:F1} | Frame: {ms:F1}ms | Throughput: {currentThroughput:F1} paths/sec";
             }
         }
 
@@ -147,11 +154,73 @@ namespace Mono
 
                 statsText.text = $"Paths: {pathCount}/{dataCollector.MaxPaths} | " +
                                 $"Success: {stats.successRate:P1} | " +
-                                $"Avg Time: {stats.avgTimeMs:F1}ms";
+                                $"Avg Time: {stats.avgTimeMs:F1}ms | " +
+                                $"Avg Length: {stats.avgLength:F1}"; // Show both timing and length for Mono
             }
             else
             {
                 statsText.text = "No data available";
+            }
+        }
+
+        void UpdateBatchStatsDisplay()
+        {
+            if (batchStatsText == null) return;
+
+            if (dataCollector != null && dataCollector.CurrentData != null && dataCollector.CurrentData.performance != null)
+            {
+                var perf = dataCollector.CurrentData.performance;
+                var batchCount = dataCollector.CurrentData.spawnBatches.Count;
+
+                if (batchCount > 0)
+                {
+                    batchStatsText.text = $"Batches: {batchCount} | " +
+                                         $"Total Spawn Time: {perf.totalSpawnTimeMs:F1}ms | " +
+                                         $"Avg/Batch: {perf.avgSpawnBatchTimeMs:F1}ms | " +
+                                         $"Fastest: {perf.fastestBatchTimeMs:F1}ms | " +
+                                         $"Slowest: {perf.slowestBatchTimeMs:F1}ms";
+                }
+                else
+                {
+                    batchStatsText.text = "No spawn batches yet";
+                }
+            }
+            else
+            {
+                batchStatsText.text = "Batch stats unavailable";
+            }
+        }
+
+        // NEW: Update throughput display
+        void UpdateThroughputDisplay()
+        {
+            if (throughputText == null) return;
+
+            if (dataCollector != null && dataCollector.CurrentData != null)
+            {
+                var stats = dataCollector.CurrentData.stats;
+                var perf = dataCollector.CurrentData.performance;
+
+                // Show current, average, peak, and overall throughput
+                throughputText.text = $"Current: {stats.pathsPerSecond:F1} paths/sec | " +
+                                     $"Avg: {stats.avgPathsPerSecond:F1} | " +
+                                     $"Peak: {stats.peakPathsPerSecond:F1} | " +
+                                     $"Overall: {perf.overallPathsPerSecond:F1}";
+
+                // Color coding based on performance (different thresholds for MonoBehaviour)
+                if (stats.pathsPerSecond > 10f)
+                    throughputText.color = Color.green;
+                else if (stats.pathsPerSecond > 5f)
+                    throughputText.color = Color.yellow;
+                else if (stats.pathsPerSecond > 0f)
+                    throughputText.color = Color.white;
+                else
+                    throughputText.color = Color.gray;
+            }
+            else
+            {
+                throughputText.text = "Throughput: Waiting for data...";
+                throughputText.color = Color.gray;
             }
         }
 
